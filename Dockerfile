@@ -4,11 +4,11 @@ FROM node:20-alpine AS builder
 WORKDIR /app
 
 # Copy package files and install dependencies from the frontend folder
-COPY frontend/package.json frontend/package-lock.json* ./
+COPY front-end/package.json front-end/package-lock.json* ./
 RUN npm install
 
 # Copy source files from the frontend folder
-COPY frontend/ ./
+COPY front-end/ ./
 
 # Build args for env variables (injected at build time by Coolify)
 ARG VITE_SUPABASE_URL
