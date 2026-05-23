@@ -4,15 +4,11 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch: # Allow manual trigger from GitHub Actions UI
+  workflow_dispatch:
 
 env:
-  # Your Coolify self-hosted Supabase API URL
-  # Port 8000 is the Kong API gateway (REST/Auth/etc.) — adjust if different
   SUPABASE_API_URL: https://supabase-api.cbpcloud.com
-  # Supabase Studio / Dashboard URL (for reference only)
   SUPABASE_STUDIO_URL: https://supabase-api.cbpcloud.com
-  # Project ref from config.toml
   PROJECT_ID: ojhfgfblwfvwnofoniuk
 
 jobs:
@@ -21,64 +17,55 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ─── 1. Checkout repo ───────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ─── 2. Setup Supabase CLI ───────────────────────────────────────────────
       - name: Setup Supabase CLI
         uses: supabase/setup-cli@v1
         with:
           version: latest
 
-      # ─── 3. Verify connectivity to self-hosted Supabase ─────────────────────
       - name: Verify Supabase connectivity
         run: |
           echo "Checking connectivity to self-hosted Supabase..."
-          curl --fail --silent --max-time 10 \
+          HTTP_CODE=$(curl --silent --max-time 10 --output /dev/null --write-out "%{http_code}" \
             "${{ env.SUPABASE_API_URL }}/rest/v1/" \
-            -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}" \
-            && echo "✅ Supabase is reachable" \
-            || (echo "❌ Cannot reach Supabase at ${{ env.SUPABASE_API_URL }}" && exit 1)
+            -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}")
+          echo "HTTP response code: $HTTP_CODE"
+          if [[ "$HTTP_CODE" == "200" || "$HTTP_CODE" == "401" ]]; then
+            echo "Supabase is reachable (HTTP $HTTP_CODE)"
+          else
+            echo "Cannot reach Supabase at ${{ env.SUPABASE_API_URL }} (HTTP $HTTP_CODE)"
+            exit 1
+          fi
 
-      # ─── 4. Link to self-hosted project ─────────────────────────────────────
-      - name: Link Supabase project
-        run: |
-          supabase link \
-            --project-ref "${{ env.PROJECT_ID }}" \
-            --password "${{ secrets.SUPABASE_DB_PASSWORD }}"
-        env:
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-
-      # ─── 5. Push DB migrations ───────────────────────────────────────────────
       - name: Push database migrations
         run: |
           echo "Pushing migrations to self-hosted Supabase..."
           supabase db push \
             --db-url "${{ secrets.SUPABASE_DB_URL }}"
-        env:
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
 
-      # ─── 6. Deploy Edge Functions ────────────────────────────────────────────
       - name: Deploy Edge Functions
         run: |
           echo "Deploying Edge Functions..."
-          # Deploy all functions found in supabase/functions/
+          if [ ! -d "supabase/functions" ]; then
+            echo "No edge functions found, skipping..."
+            exit 0
+          fi
           for fn_dir in supabase/functions/*/; do
             fn_name=$(basename "$fn_dir")
-            # Skip internal supabase dirs
             if [[ "$fn_name" == "_*" ]]; then
               continue
             fi
-            echo "→ Deploying function: $fn_name"
+            echo "Deploying function: $fn_name"
             supabase functions deploy "$fn_name" \
-              --project-ref "${{ env.PROJECT_ID }}"
+              --project-ref "${{ env.PROJECT_ID }}" \
+              --endpoint "${{ env.SUPABASE_API_URL }}"
           done
-          echo "✅ All Edge Functions deployed"
+          echo "All Edge Functions deployed"
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
 
-      # ─── 7. Summary ──────────────────────────────────────────────────────────
       - name: Print sync summary
         if: always()
         run: |
