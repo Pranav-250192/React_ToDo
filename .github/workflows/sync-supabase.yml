@@ -9,9 +9,9 @@ on:
 env:
   # Your Coolify self-hosted Supabase API URL
   # Port 8000 is the Kong API gateway (REST/Auth/etc.) — adjust if different
-  SUPABASE_API_URL: http://192.168.0.13:8000
+  SUPABASE_API_URL: https://supabase-api.cbpcloud.com
   # Supabase Studio / Dashboard URL (for reference only)
-  SUPABASE_STUDIO_URL: http://192.168.0.13:3001
+  SUPABASE_STUDIO_URL: https://supabase-api.cbpcloud.com
   # Project ref from config.toml
   PROJECT_ID: ojhfgfblwfvwnofoniuk
 
