@@ -39,29 +39,10 @@ jobs:
             exit 1
           fi
 
-      - name: Resolve IPv4 and Push database migrations  # ← CHANGED STEP
+      - name: Push database migrations
         run: |
           echo "Pushing migrations to self-hosted Supabase..."
-
-          # Extract hostname from DB URL and resolve to IPv4
-          DB_URL="${{ secrets.SUPABASE_DB_URL }}"
-          HOSTNAME=$(echo "$DB_URL" | sed -E 's|.*@([^:/]+).*|\1|')
-          echo "Resolving hostname: $HOSTNAME"
-
-          # Force IPv4 resolution
-          IPV4=$(dig +short A "$HOSTNAME" | grep -E '^[0-9]+\.' | head -1)
-          echo "Resolved IPv4: $IPV4"
-
-          if [ -z "$IPV4" ]; then
-            echo "Could not resolve IPv4 for $HOSTNAME, using original URL"
-            RESOLVED_DB_URL="$DB_URL"
-          else
-            # Replace hostname with IPv4 in DB URL
-            RESOLVED_DB_URL=$(echo "$DB_URL" | sed "s/$HOSTNAME/$IPV4/")
-            echo "Using IPv4-resolved URL"
-          fi
-
-          supabase db push --db-url "$RESOLVED_DB_URL"
+          supabase db push --db-url "${{ secrets.SUPABASE_DB_URL }}"
 
       - name: Deploy Edge Functions
         run: |
@@ -87,9 +68,9 @@ jobs:
       - name: Print sync summary
         if: always()
         run: |
-          echo "==========================="
+          echo "============================================"
           echo "  Sync Summary"
-          echo "==================================="
+          echo "============================================"
           echo "  Repo   : https://github.com/Pranav-250192/React_ToDo"
           echo "  Branch : main"
           echo "  Target : ${{ env.SUPABASE_STUDIO_URL }}/project/default"
