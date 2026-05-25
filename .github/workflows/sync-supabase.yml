@@ -39,15 +39,33 @@ jobs:
             exit 1
           fi
       
+      - name: Test database connectivity
+        env:
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: |
+          echo "Testing database connection..."
+          
+          # Install PostgreSQL client
+          sudo apt-get update -qq
+          sudo apt-get install -y postgresql-client
+          
+          # Test connection (try multiple formats)
+          echo "Attempting connection..."
+          
+          # Format 1: Direct connection (port 5432)
+          PGPASSWORD="${SUPABASE_DB_PASSWORD}" psql \
+            "postgresql://postgres:${SUPABASE_DB_PASSWORD}@db-tunnel.cbpcloud.com:5432/postgres?sslmode=require" \
+            -c "SELECT version();" && echo "✅ Direct connection works!" || echo "❌ Direct connection failed"
+      
       - name: Push database migrations
         env:
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: |
           echo "Pushing migrations to self-hosted Supabase..."
           
-          # Using Supavisor pooler connection (port 6543 for transaction mode)
+          # Use direct connection (bypass Supavisor for migrations)
           PGCONNECT_TIMEOUT=30 supabase db push \
-            --db-url "postgresql://postgres.ojhfgfblwfvwnofoniuk:${SUPABASE_DB_PASSWORD}@db-tunnel.cbpcloud.com:6543/postgres"
+            --db-url "postgresql://postgres:${SUPABASE_DB_PASSWORD}@db-tunnel.cbpcloud.com:5432/postgres?sslmode=require"
           
           echo "✅ Migrations pushed successfully"
       
@@ -60,16 +78,13 @@ jobs:
             exit 0
           fi
           
-          # Count functions
           FUNCTION_COUNT=0
           
           for fn_dir in supabase/functions/*/; do
-            # Skip if no functions exist
             [ -d "$fn_dir" ] || continue
             
             fn_name=$(basename "$fn_dir")
             
-            # Skip shared/private directories
             if [[ "$fn_name" == "_"* ]]; then
               echo "⏭️  Skipping private directory: $fn_name"
               continue
