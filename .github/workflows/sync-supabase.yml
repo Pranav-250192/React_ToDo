@@ -15,16 +15,16 @@ jobs:
   sync-supabase:
     name: Sync DB Migrations & Edge Functions
     runs-on: ubuntu-latest
-
+    
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
+      
       - name: Setup Supabase CLI
         uses: supabase/setup-cli@v1
         with:
           version: latest
-
+      
       - name: Verify Supabase connectivity
         run: |
           echo "Checking connectivity to self-hosted Supabase..."
@@ -33,41 +33,68 @@ jobs:
             -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}")
           echo "HTTP response code: $HTTP_CODE"
           if [[ "$HTTP_CODE" == "200" || "$HTTP_CODE" == "401" ]]; then
-            echo "Supabase is reachable (HTTP $HTTP_CODE)"
+            echo "✅ Supabase API is reachable (HTTP $HTTP_CODE)"
           else
-            echo "Cannot reach Supabase at ${{ env.SUPABASE_API_URL }} (HTTP $HTTP_CODE)"
+            echo "❌ Cannot reach Supabase at ${{ env.SUPABASE_API_URL }} (HTTP $HTTP_CODE)"
             exit 1
           fi
-
-      - name: Push database migrations via Cloudflare tunnel
+      
+      - name: Push database migrations
         env:
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: |
           echo "Pushing migrations to self-hosted Supabase..."
+          
+          # Using Supavisor pooler connection (port 6543 for transaction mode)
           PGCONNECT_TIMEOUT=30 supabase db push \
-            --db-url "postgresql://postgres:${SUPABASE_DB_PASSWORD}@db-tunnel.cbpcloud.com:15432/postgres?sslmode=disable"
-
+            --db-url "postgresql://postgres.ojhfgfblwfvwnofoniuk:${SUPABASE_DB_PASSWORD}@db-tunnel.cbpcloud.com:6543/postgres"
+          
+          echo "✅ Migrations pushed successfully"
+      
       - name: Deploy Edge Functions
         run: |
           echo "Deploying Edge Functions..."
+          
           if [ ! -d "supabase/functions" ]; then
-            echo "No edge functions found, skipping..."
+            echo "ℹ️  No edge functions directory found, skipping..."
             exit 0
           fi
+          
+          # Count functions
+          FUNCTION_COUNT=0
+          
           for fn_dir in supabase/functions/*/; do
+            # Skip if no functions exist
+            [ -d "$fn_dir" ] || continue
+            
             fn_name=$(basename "$fn_dir")
-            if [[ "$fn_name" == "_*" ]]; then
+            
+            # Skip shared/private directories
+            if [[ "$fn_name" == "_"* ]]; then
+              echo "⏭️  Skipping private directory: $fn_name"
               continue
             fi
-            echo "Deploying function: $fn_name"
+            
+            echo "📦 Deploying function: $fn_name"
+            
             supabase functions deploy "$fn_name" \
               --project-ref "${{ env.PROJECT_ID }}" \
-              --endpoint "${{ env.SUPABASE_API_URL }}"
+              --endpoint "${{ env.SUPABASE_API_URL }}" || {
+              echo "⚠️  Failed to deploy $fn_name"
+              exit 1
+            }
+            
+            FUNCTION_COUNT=$((FUNCTION_COUNT + 1))
           done
-          echo "All Edge Functions deployed"
+          
+          if [ $FUNCTION_COUNT -eq 0 ]; then
+            echo "ℹ️  No edge functions to deploy"
+          else
+            echo "✅ Deployed $FUNCTION_COUNT edge function(s)"
+          fi
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-
+      
       - name: Print sync summary
         if: always()
         run: |
