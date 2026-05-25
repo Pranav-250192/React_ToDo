@@ -48,26 +48,36 @@ jobs:
           cloudflared --version
 
       - name: Start Cloudflare tunnel & Push migrations
+        env:
+          CLOUDFLARE_TUNNEL_CREDS: ${{ secrets.CLOUDFLARE_TUNNEL_CREDS }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: |
           echo "Setting up tunnel credentials..."
-          mkdir -p ~/.cloudflared
+          mkdir -p /root/.cloudflared
 
-          # Write tunnel credentials
-          echo '${{ secrets.CLOUDFLARE_TUNNEL_CREDS }}' \
-            > ~/.cloudflared/209e0f3d-fb94-4703-92ad-cd83a2c94179.json
+          # Write credentials using env var (not single-quoted secret)
+          echo "$CLOUDFLARE_TUNNEL_CREDS" > /root/.cloudflared/209e0f3d-fb94-4703-92ad-cd83a2c94179.json
 
-          # Write tunnel config - forwards localhost:15432 to DB container
-          cat > ~/.cloudflared/config.yml << 'EOF'
-          tunnel: 209e0f3d-fb94-4703-92ad-cd83a2c94179
-          credentials-file: /root/.cloudflared/209e0f3d-fb94-4703-92ad-cd83a2c94179.json
-          ingress:
-            - hostname: db-tunnel.cbpcloud.com
-              service: tcp://localhost:15432
-            - service: http_status:404
-          EOF
+          # Verify file written correctly
+          echo "Verifying credentials file..."
+          cat /root/.cloudflared/209e0f3d-fb94-4703-92ad-cd83a2c94179.json
+
+          # Write tunnel config (no indentation inside heredoc!)
+          cat > /root/.cloudflared/config.yml << 'EOF'
+tunnel: 209e0f3d-fb94-4703-92ad-cd83a2c94179
+credentials-file: /root/.cloudflared/209e0f3d-fb94-4703-92ad-cd83a2c94179.json
+ingress:
+  - hostname: db-tunnel.cbpcloud.com
+    service: tcp://localhost:15432
+  - service: http_status:404
+EOF
+
+          # Verify config
+          echo "Tunnel config:"
+          cat /root/.cloudflared/config.yml
 
           # Start tunnel in background
-          cloudflared tunnel --config ~/.cloudflared/config.yml run \
+          cloudflared tunnel --config /root/.cloudflared/config.yml run \
             209e0f3d-fb94-4703-92ad-cd83a2c94179 > /tmp/tunnel.log 2>&1 &
           TUNNEL_PID=$!
           echo "Tunnel PID: $TUNNEL_PID"
@@ -81,15 +91,16 @@ jobs:
               break
             fi
             echo "Attempt $i: waiting..."
-            cat /tmp/tunnel.log 2>/dev/null | tail -3
+            tail -3 /tmp/tunnel.log 2>/dev/null
           done
 
+          echo "=== Full tunnel log ==="
           cat /tmp/tunnel.log
 
-          # Push migrations
+          # Push migrations via tunnel
           echo "Pushing migrations..."
           supabase db push \
-            --db-url "postgresql://postgres:${{ secrets.SUPABASE_DB_PASSWORD }}@localhost:15432/postgres"
+            --db-url "postgresql://postgres:${SUPABASE_DB_PASSWORD}@localhost:15432/postgres"
 
       - name: Deploy Edge Functions
         run: |
