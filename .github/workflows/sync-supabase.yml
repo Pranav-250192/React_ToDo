@@ -41,8 +41,7 @@ jobs:
 
       - name: Install cloudflared
         run: |
-          curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
-            -o cloudflared
+          curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
           chmod +x cloudflared
           sudo mv cloudflared /usr/local/bin/
           cloudflared --version
@@ -54,35 +53,15 @@ jobs:
         run: |
           echo "Setting up tunnel credentials..."
           mkdir -p /root/.cloudflared
-
-          # Write credentials using env var (not single-quoted secret)
           echo "$CLOUDFLARE_TUNNEL_CREDS" > /root/.cloudflared/209e0f3d-fb94-4703-92ad-cd83a2c94179.json
-
-          # Verify file written correctly
           echo "Verifying credentials file..."
           cat /root/.cloudflared/209e0f3d-fb94-4703-92ad-cd83a2c94179.json
-
-          # Write tunnel config (no indentation inside heredoc!)
-          cat > /root/.cloudflared/config.yml << 'EOF'
-tunnel: 209e0f3d-fb94-4703-92ad-cd83a2c94179
-credentials-file: /root/.cloudflared/209e0f3d-fb94-4703-92ad-cd83a2c94179.json
-ingress:
-  - hostname: db-tunnel.cbpcloud.com
-    service: tcp://localhost:15432
-  - service: http_status:404
-EOF
-
-          # Verify config
+          printf 'tunnel: 209e0f3d-fb94-4703-92ad-cd83a2c94179\ncredentials-file: /root/.cloudflared/209e0f3d-fb94-4703-92ad-cd83a2c94179.json\ningress:\n  - hostname: db-tunnel.cbpcloud.com\n    service: tcp://localhost:15432\n  - service: http_status:404\n' > /root/.cloudflared/config.yml
           echo "Tunnel config:"
           cat /root/.cloudflared/config.yml
-
-          # Start tunnel in background
-          cloudflared tunnel --config /root/.cloudflared/config.yml run \
-            209e0f3d-fb94-4703-92ad-cd83a2c94179 > /tmp/tunnel.log 2>&1 &
+          cloudflared tunnel --config /root/.cloudflared/config.yml run 209e0f3d-fb94-4703-92ad-cd83a2c94179 > /tmp/tunnel.log 2>&1 &
           TUNNEL_PID=$!
           echo "Tunnel PID: $TUNNEL_PID"
-
-          # Wait for tunnel to connect
           echo "Waiting for tunnel to connect..."
           for i in {1..15}; do
             sleep 2
@@ -93,14 +72,10 @@ EOF
             echo "Attempt $i: waiting..."
             tail -3 /tmp/tunnel.log 2>/dev/null
           done
-
           echo "=== Full tunnel log ==="
           cat /tmp/tunnel.log
-
-          # Push migrations via tunnel
           echo "Pushing migrations..."
-          supabase db push \
-            --db-url "postgresql://postgres:${SUPABASE_DB_PASSWORD}@localhost:15432/postgres"
+          supabase db push --db-url "postgresql://postgres:${SUPABASE_DB_PASSWORD}@localhost:15432/postgres"
 
       - name: Deploy Edge Functions
         run: |
