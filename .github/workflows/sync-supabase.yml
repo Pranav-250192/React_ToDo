@@ -10,9 +10,6 @@ env:
   SUPABASE_API_URL: https://supabase-api.cbpcloud.com
   SUPABASE_STUDIO_URL: https://supabase-api.cbpcloud.com
   PROJECT_ID: ojhfgfblwfvwnofoniuk
-  # Database connection via Supavisor pooler
-  DB_HOST: db-tunnel.cbpcloud.com
-  DB_PORT: 6543  # Supavisor transaction mode port
 
 jobs:
   sync-supabase:
@@ -28,17 +25,19 @@ jobs:
         with:
           version: latest
       
-      - name: Verify Supabase connectivity
+      - name: Verify Supabase API connectivity
         run: |
-          echo "Checking connectivity to self-hosted Supabase..."
+          echo "Checking Supabase API connectivity..."
           HTTP_CODE=$(curl --silent --max-time 10 --output /dev/null --write-out "%{http_code}" \
             "${{ env.SUPABASE_API_URL }}/rest/v1/" \
             -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}")
+          
           echo "HTTP response code: $HTTP_CODE"
+          
           if [[ "$HTTP_CODE" == "200" || "$HTTP_CODE" == "401" ]]; then
-            echo "✅ Supabase API is reachable (HTTP $HTTP_CODE)"
+            echo "✅ Supabase API is reachable"
           else
-            echo "❌ Cannot reach Supabase at ${{ env.SUPABASE_API_URL }} (HTTP $HTTP_CODE)"
+            echo "❌ Cannot reach Supabase API"
             exit 1
           fi
       
@@ -46,26 +45,30 @@ jobs:
         env:
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: |
-          echo "Pushing migrations to self-hosted Supabase..."
-          echo "Using Supavisor pooler at ${{ env.DB_HOST }}:${{ env.DB_PORT }}"
+          echo "============================================"
+          echo "  Pushing Database Migrations"
+          echo "============================================"
+          echo "Database host: db-tunnel.cbpcloud.com:15432"
+          echo ""
           
-          # Try with pooler on port 6543
+          # Connect through Cloudflare Tunnel (already running on your server)
+          # Tunnel routes: db-tunnel.cbpcloud.com:15432 -> 127.0.0.1:15432 (Supavisor)
           PGCONNECT_TIMEOUT=30 supabase db push \
-            --db-url "postgresql://postgres.ojhfgfblwfvwnofoniuk:${SUPABASE_DB_PASSWORD}@${{ env.DB_HOST }}:${{ env.DB_PORT }}/postgres" \
-            || {
-              echo "❌ Migration failed with port 6543, trying port 5432..."
-              PGCONNECT_TIMEOUT=30 supabase db push \
-                --db-url "postgresql://postgres:${SUPABASE_DB_PASSWORD}@${{ env.DB_HOST }}:5432/postgres"
-            }
+            --db-url "postgresql://postgres:${SUPABASE_DB_PASSWORD}@db-tunnel.cbpcloud.com:15432/postgres?sslmode=disable"
           
-          echo "✅ Migrations pushed successfully"
+          echo ""
+          echo "✅ Migrations pushed successfully!"
       
       - name: Deploy Edge Functions
+        if: success()
         run: |
-          echo "Deploying Edge Functions..."
+          echo "============================================"
+          echo "  Deploying Edge Functions"
+          echo "============================================"
           
           if [ ! -d "supabase/functions" ]; then
-            echo "ℹ️  No edge functions directory found, skipping..."
+            echo "ℹ️  No edge functions directory found"
+            echo "Skipping edge function deployment"
             exit 0
           fi
           
@@ -76,39 +79,44 @@ jobs:
             
             fn_name=$(basename "$fn_dir")
             
+            # Skip private/shared directories
             if [[ "$fn_name" == "_"* ]]; then
               echo "⏭️  Skipping private directory: $fn_name"
               continue
             fi
             
+            echo ""
             echo "📦 Deploying function: $fn_name"
             
             supabase functions deploy "$fn_name" \
               --project-ref "${{ env.PROJECT_ID }}" \
               --endpoint "${{ env.SUPABASE_API_URL }}" || {
-              echo "⚠️  Failed to deploy $fn_name"
+              echo "❌ Failed to deploy $fn_name"
               exit 1
             }
             
             FUNCTION_COUNT=$((FUNCTION_COUNT + 1))
           done
           
+          echo ""
           if [ $FUNCTION_COUNT -eq 0 ]; then
-            echo "ℹ️  No edge functions to deploy"
+            echo "ℹ️  No edge functions found to deploy"
           else
-            echo "✅ Deployed $FUNCTION_COUNT edge function(s)"
+            echo "✅ Successfully deployed $FUNCTION_COUNT function(s)!"
           fi
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
       
-      - name: Print sync summary
+      - name: Print Deployment Summary
         if: always()
         run: |
+          echo ""
           echo "============================================"
-          echo "  Sync Summary"
+          echo "  📊 Deployment Summary"
           echo "============================================"
-          echo "  Repo   : https://github.com/Pranav-250192/React_ToDo"
-          echo "  Branch : main"
-          echo "  Target : ${{ env.SUPABASE_STUDIO_URL }}/project/default"
-          echo "  Status : ${{ job.status }}"
+          echo "  Repository : ${{ github.repository }}"
+          echo "  Branch     : ${{ github.ref_name }}"
+          echo "  Commit     : ${{ github.sha }}"
+          echo "  Status     : ${{ job.status }}"
+          echo "  Target     : ${{ env.SUPABASE_STUDIO_URL }}"
           echo "============================================"
