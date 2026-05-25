@@ -10,6 +10,9 @@ env:
   SUPABASE_API_URL: https://supabase-api.cbpcloud.com
   SUPABASE_STUDIO_URL: https://supabase-api.cbpcloud.com
   PROJECT_ID: ojhfgfblwfvwnofoniuk
+  # Database connection via Supavisor pooler
+  DB_HOST: db-tunnel.cbpcloud.com
+  DB_PORT: 6543  # Supavisor transaction mode port
 
 jobs:
   sync-supabase:
@@ -39,33 +42,21 @@ jobs:
             exit 1
           fi
       
-      - name: Test database connectivity
-        env:
-          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
-        run: |
-          echo "Testing database connection..."
-          
-          # Install PostgreSQL client
-          sudo apt-get update -qq
-          sudo apt-get install -y postgresql-client
-          
-          # Test connection (try multiple formats)
-          echo "Attempting connection..."
-          
-          # Format 1: Direct connection (port 5432)
-          PGPASSWORD="${SUPABASE_DB_PASSWORD}" psql \
-            "postgresql://postgres:${SUPABASE_DB_PASSWORD}@db-tunnel.cbpcloud.com:5432/postgres?sslmode=require" \
-            -c "SELECT version();" && echo "✅ Direct connection works!" || echo "❌ Direct connection failed"
-      
       - name: Push database migrations
         env:
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: |
           echo "Pushing migrations to self-hosted Supabase..."
+          echo "Using Supavisor pooler at ${{ env.DB_HOST }}:${{ env.DB_PORT }}"
           
-          # Use direct connection (bypass Supavisor for migrations)
+          # Try with pooler on port 6543
           PGCONNECT_TIMEOUT=30 supabase db push \
-            --db-url "postgresql://postgres:${SUPABASE_DB_PASSWORD}@db-tunnel.cbpcloud.com:5432/postgres?sslmode=require"
+            --db-url "postgresql://postgres.ojhfgfblwfvwnofoniuk:${SUPABASE_DB_PASSWORD}@${{ env.DB_HOST }}:${{ env.DB_PORT }}/postgres" \
+            || {
+              echo "❌ Migration failed with port 6543, trying port 5432..."
+              PGCONNECT_TIMEOUT=30 supabase db push \
+                --db-url "postgresql://postgres:${SUPABASE_DB_PASSWORD}@${{ env.DB_HOST }}:5432/postgres"
+            }
           
           echo "✅ Migrations pushed successfully"
       
