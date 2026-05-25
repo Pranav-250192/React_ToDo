@@ -39,10 +39,29 @@ jobs:
             exit 1
           fi
 
+      - name: Install cloudflared
+        run: |
+          curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+            -o cloudflared
+          chmod +x cloudflared
+          sudo mv cloudflared /usr/local/bin/
+          cloudflared --version
+
+      - name: Start Cloudflare TCP tunnel
+        run: |
+          cloudflared access tcp \
+            --hostname supabase-db.cbpcloud.com \
+            --url localhost:5433 &
+          echo "Waiting for tunnel to establish..."
+          sleep 5
+          echo "Tunnel started"
+
       - name: Push database migrations
         run: |
           echo "Pushing migrations to self-hosted Supabase..."
-          supabase db push --db-url "${{ secrets.SUPABASE_DB_URL }}"
+          # Debug URL format (password hidden)
+          echo "${{ secrets.SUPABASE_DB_URL }}" | sed 's/:\/\/[^:]*:[^@]*@/:\/\/***:***@/'
+          supabase db push --db-url "postgresql://postgres:${{ secrets.SUPABASE_DB_PASSWORD }}@localhost:5433/postgres"
 
       - name: Deploy Edge Functions
         run: |
@@ -68,11 +87,11 @@ jobs:
       - name: Print sync summary
         if: always()
         run: |
-          echo "============================================="
+          echo "============================================"
           echo "  Sync Summary"
-          echo "========================================="
+          echo "============================================"
           echo "  Repo   : https://github.com/Pranav-250192/React_ToDo"
           echo "  Branch : main"
           echo "  Target : ${{ env.SUPABASE_STUDIO_URL }}/project/default"
           echo "  Status : ${{ job.status }}"
-          echo "========================================"
+          echo "============================================"
