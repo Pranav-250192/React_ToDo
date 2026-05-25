@@ -47,21 +47,35 @@ jobs:
           sudo mv cloudflared /usr/local/bin/
           cloudflared --version
 
-      - name: Start Cloudflare TCP tunnel
+      - name: Start Cloudflare TCP tunnel & Push migrations
         run: |
+          echo "Starting Cloudflare TCP tunnel..."
+
+          # Start tunnel - forwards localhost:15432 → supabase-db.cbpcloud.com
           cloudflared access tcp \
             --hostname supabase-db.cbpcloud.com \
-            --url localhost:5433 &
-          echo "Waiting for tunnel to establish..."
-          sleep 5
-          echo "Tunnel started"
+            --url localhost:15432 > /tmp/cloudflared.log 2>&1 &
+          TUNNEL_PID=$!
+          echo "Tunnel PID: $TUNNEL_PID"
 
-      - name: Push database migrations
-        run: |
-          echo "Pushing migrations to self-hosted Supabase..."
-          # Debug URL format (password hidden)
-          echo "${{ secrets.SUPABASE_DB_URL }}" | sed 's/:\/\/[^:]*:[^@]*@/:\/\/***:***@/'
-          supabase db push --db-url "postgresql://postgres:${{ secrets.SUPABASE_DB_PASSWORD }}@localhost:5433/postgres"
+          # Wait for tunnel to be ready
+          echo "Waiting for tunnel..."
+          for i in {1..10}; do
+            sleep 2
+            if nc -z localhost 15432 2>/dev/null; then
+              echo "Tunnel is ready!"
+              break
+            fi
+            echo "Attempt $i: tunnel not ready yet..."
+          done
+
+          # Show tunnel logs
+          cat /tmp/cloudflared.log
+
+          # Push migrations via tunnel
+          echo "Pushing migrations..."
+          supabase db push \
+            --db-url "postgresql://postgres:${{ secrets.SUPABASE_DB_PASSWORD }}@localhost:15432/postgres"
 
       - name: Deploy Edge Functions
         run: |
