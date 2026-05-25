@@ -68,11 +68,11 @@ jobs:
       - name: Print sync summary
         if: always()
         run: |
-          echo "============================================"
+          echo "========================================="
           echo "  Sync Summary"
-          echo "============================================"
+          echo "========================================="
           echo "  Repo   : https://github.com/Pranav-250192/React_ToDo"
           echo "  Branch : main"
           echo "  Target : ${{ env.SUPABASE_STUDIO_URL }}/project/default"
           echo "  Status : ${{ job.status }}"
-          echo "============================================"
+          echo "========================================"
