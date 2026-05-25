@@ -52,14 +52,14 @@ jobs:
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: |
           echo "Setting up tunnel credentials..."
-          mkdir -p /root/.cloudflared
-          echo "$CLOUDFLARE_TUNNEL_CREDS" > /root/.cloudflared/209e0f3d-fb94-4703-92ad-cd83a2c94179.json
+          mkdir -p $HOME/.cloudflared
+          echo "$CLOUDFLARE_TUNNEL_CREDS" > $HOME/.cloudflared/209e0f3d-fb94-4703-92ad-cd83a2c94179.json
           echo "Verifying credentials file..."
-          cat /root/.cloudflared/209e0f3d-fb94-4703-92ad-cd83a2c94179.json
-          printf 'tunnel: 209e0f3d-fb94-4703-92ad-cd83a2c94179\ncredentials-file: /root/.cloudflared/209e0f3d-fb94-4703-92ad-cd83a2c94179.json\ningress:\n  - hostname: db-tunnel.cbpcloud.com\n    service: tcp://localhost:15432\n  - service: http_status:404\n' > /root/.cloudflared/config.yml
+          cat $HOME/.cloudflared/209e0f3d-fb94-4703-92ad-cd83a2c94179.json
+          printf 'tunnel: 209e0f3d-fb94-4703-92ad-cd83a2c94179\ncredentials-file: %s/.cloudflared/209e0f3d-fb94-4703-92ad-cd83a2c94179.json\ningress:\n  - hostname: db-tunnel.cbpcloud.com\n    service: tcp://localhost:15432\n  - service: http_status:404\n' "$HOME" > $HOME/.cloudflared/config.yml
           echo "Tunnel config:"
-          cat /root/.cloudflared/config.yml
-          cloudflared tunnel --config /root/.cloudflared/config.yml run 209e0f3d-fb94-4703-92ad-cd83a2c94179 > /tmp/tunnel.log 2>&1 &
+          cat $HOME/.cloudflared/config.yml
+          cloudflared tunnel --config $HOME/.cloudflared/config.yml run 209e0f3d-fb94-4703-92ad-cd83a2c94179 > /tmp/tunnel.log 2>&1 &
           TUNNEL_PID=$!
           echo "Tunnel PID: $TUNNEL_PID"
           echo "Waiting for tunnel to connect..."
