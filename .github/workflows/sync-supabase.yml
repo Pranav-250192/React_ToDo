@@ -51,14 +51,14 @@ jobs:
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: |
           echo "Starting Cloudflare TCP proxy..."
-          cloudflared access tcp --hostname db-tunnel.cbpcloud.com --url localhost:15432 &
+          cloudflared access tcp --hostname db-tunnel.cbpcloud.com --url 127.0.0.1:15432 &
           CF_PID=$!
           echo "Cloudflared PID: $CF_PID"
 
           echo "Waiting for proxy to be ready..."
           for i in {1..10}; do
             sleep 2
-            if nc -z localhost 15432 2>/dev/null; then
+            if nc -z 127.0.0.1 15432 2>/dev/null; then
               echo "Proxy is ready!"
               break
             fi
@@ -66,7 +66,8 @@ jobs:
           done
 
           echo "Pushing migrations..."
-          supabase db push --db-url "postgresql://postgres:${SUPABASE_DB_PASSWORD}@localhost:15432/postgres"
+          PGCONNECT_TIMEOUT=30 supabase db push \
+            --db-url "postgresql://postgres:${SUPABASE_DB_PASSWORD}@127.0.0.1:15432/postgres?sslmode=disable"
 
       - name: Deploy Edge Functions
         run: |
