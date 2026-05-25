@@ -10,8 +10,9 @@ env:
   SUPABASE_API_URL: https://supabase-api.cbpcloud.com
   SUPABASE_STUDIO_URL: https://supabase-api.cbpcloud.com
   PROJECT_ID: ojhfgfblwfvwnofoniuk
-  DB_HOST: db-tunnel.cbpcloud.com
-  DB_PORT: 5433  # Will work after updating tunnel config
+  DB_PORT: 5433
+  SSH_HOST: 125.99.135.42
+  SSH_PORT: 22
 
 jobs:
   sync-supabase:
@@ -28,24 +29,61 @@ jobs:
         with:
           version: latest
       
-      - name: Install PostgreSQL client
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y postgresql-client netcat-openbsd
+          sudo apt-get install -y postgresql-client openssh-client
+      
+      - name: Setup SSH tunnel
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          echo "🔐 Setting up SSH tunnel..."
+          
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          
+          cat > ~/.ssh/config << EOF
+          Host ${{ env.SSH_HOST }}
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+            ServerAliveInterval 60
+            ServerAliveCountMax 3
+          EOF
+          
+          echo "Testing SSH connection..."
+          ssh -p ${{ env.SSH_PORT }} root@${{ env.SSH_HOST }} "echo 'SSH connection successful'" || {
+            echo "❌ SSH connection failed"
+            exit 1
+          }
+          
+          echo "Starting SSH tunnel..."
+          ssh -fN -L 5433:localhost:5433 \
+            -p ${{ env.SSH_PORT }} \
+            root@${{ env.SSH_HOST }}
+          
+          sleep 3
+          if ss -tln | grep -q ':5433'; then
+            echo "✅ SSH tunnel established"
+          else
+            echo "❌ SSH tunnel failed"
+            exit 1
+          fi
       
       - name: Verify Supabase API connectivity
         run: |
-          echo "🔍 Checking Supabase API connectivity..."
+          echo "🔍 Checking Supabase API..."
           HTTP_CODE=$(curl --silent --max-time 10 --output /dev/null --write-out "%{http_code}" \
             "${{ env.SUPABASE_API_URL }}/rest/v1/" \
             -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}")
           
-          echo "HTTP response code: $HTTP_CODE"
-          
           if [[ "$HTTP_CODE" == "200" || "$HTTP_CODE" == "401" ]]; then
-            echo "✅ Supabase API is reachable"
+            echo "✅ API reachable"
           else
-            echo "❌ Cannot reach Supabase API (HTTP $HTTP_CODE)"
+            echo "❌ API unreachable (HTTP $HTTP_CODE)"
             exit 1
           fi
       
@@ -53,52 +91,28 @@ jobs:
         env:
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: |
-          echo "🔌 Testing database connection..."
-          echo "Host: ${{ env.DB_HOST }}"
-          echo "Port: ${{ env.DB_PORT }}"
+          echo "🔌 Testing database..."
           
-          # Test TCP connection
-          echo "Testing TCP port..."
-          if timeout 10s bash -c "echo > /dev/tcp/${{ env.DB_HOST }}/${{ env.DB_PORT }}" 2>/dev/null; then
-            echo "✅ Port ${{ env.DB_PORT }} is reachable"
-          else
-            echo "❌ Cannot connect to ${{ env.DB_HOST }}:${{ env.DB_PORT }}"
-            exit 1
-          fi
-          
-          # Test PostgreSQL connection
-          echo "Testing PostgreSQL authentication..."
           PGPASSWORD="${SUPABASE_DB_PASSWORD}" PGCONNECT_TIMEOUT=10 psql \
-            -h "${{ env.DB_HOST }}" \
-            -p ${{ env.DB_PORT }} \
+            -h localhost \
+            -p 5433 \
             -U postgres \
             -d postgres \
             -c "SELECT version();" || {
-            echo "❌ PostgreSQL authentication failed"
+            echo "❌ Database connection failed"
             exit 1
           }
           
-          echo "✅ Database connection successful!"
+          echo "✅ Database connected!"
       
       - name: Check migration files
         id: check-migrations
         run: |
-          echo "📂 Checking for migration files..."
-          
-          if [ ! -d "supabase/migrations" ]; then
-            echo "⚠️  No migrations directory found"
-            echo "has_migrations=false" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          
-          MIGRATION_COUNT=$(find supabase/migrations -name "*.sql" 2>/dev/null | wc -l)
-          echo "Found $MIGRATION_COUNT migration file(s)"
-          
-          if [ $MIGRATION_COUNT -eq 0 ]; then
+          if [ ! -d "supabase/migrations" ] || [ $(find supabase/migrations -name "*.sql" 2>/dev/null | wc -l) -eq 0 ]; then
             echo "has_migrations=false" >> $GITHUB_OUTPUT
           else
             echo "has_migrations=true" >> $GITHUB_OUTPUT
-            echo "Migration files:"
+            echo "Migrations found:"
             find supabase/migrations -name "*.sql" -exec basename {} \;
           fi
       
@@ -107,25 +121,16 @@ jobs:
         env:
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: |
-          echo "============================================"
-          echo "  📦 Pushing Database Migrations"
-          echo "============================================"
+          echo "📦 Pushing migrations..."
           
           PGCONNECT_TIMEOUT=30 supabase db push \
-            --db-url "postgresql://postgres:${SUPABASE_DB_PASSWORD}@${{ env.DB_HOST }}:${{ env.DB_PORT }}/postgres?sslmode=disable"
+            --db-url "postgresql://postgres:${SUPABASE_DB_PASSWORD}@localhost:5433/postgres?sslmode=disable"
           
-          echo "✅ Migrations pushed successfully!"
-      
-      - name: Skip migrations message
-        if: steps.check-migrations.outputs.has_migrations == 'false'
-        run: |
-          echo "ℹ️  No migrations to push"
+          echo "✅ Migrations applied!"
       
       - name: Check edge functions
         id: check-functions
         run: |
-          echo "📂 Checking for edge functions..."
-          
           if [ ! -d "supabase/functions" ]; then
             echo "has_functions=false" >> $GITHUB_OUTPUT
             exit 0
@@ -135,70 +140,49 @@ jobs:
           for fn_dir in supabase/functions/*/; do
             [ -d "$fn_dir" ] || continue
             fn_name=$(basename "$fn_dir")
-            
-            if [[ "$fn_name" == "_"* ]]; then
-              continue
-            fi
-            
-            if [[ -f "${fn_dir}index.ts" || -f "${fn_dir}index.js" ]]; then
-              FUNCTION_COUNT=$((FUNCTION_COUNT + 1))
-            fi
+            [[ "$fn_name" == "_"* ]] && continue
+            [[ -f "${fn_dir}index.ts" || -f "${fn_dir}index.js" ]] && FUNCTION_COUNT=$((FUNCTION_COUNT + 1))
           done
           
-          echo "Found $FUNCTION_COUNT deployable function(s)"
-          
-          if [ $FUNCTION_COUNT -eq 0 ]; then
-            echo "has_functions=false" >> $GITHUB_OUTPUT
-          else
-            echo "has_functions=true" >> $GITHUB_OUTPUT
-          fi
+          [ $FUNCTION_COUNT -eq 0 ] && echo "has_functions=false" >> $GITHUB_OUTPUT || echo "has_functions=true" >> $GITHUB_OUTPUT
       
       - name: Deploy Edge Functions
         if: steps.check-functions.outputs.has_functions == 'true'
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
         run: |
-          echo "============================================"
-          echo "  🚀 Deploying Edge Functions"
-          echo "============================================"
-          
-          FUNCTION_COUNT=0
+          echo "🚀 Deploying functions..."
           
           for fn_dir in supabase/functions/*/; do
             [ -d "$fn_dir" ] || continue
             fn_name=$(basename "$fn_dir")
+            [[ "$fn_name" == "_"* ]] && continue
+            [[ ! -f "${fn_dir}index.ts" && ! -f "${fn_dir}index.js" ]] && continue
             
-            if [[ "$fn_name" == "_"* ]]; then
-              continue
-            fi
-            
-            if [[ ! -f "${fn_dir}index.ts" && ! -f "${fn_dir}index.js" ]]; then
-              continue
-            fi
-            
-            echo "📦 Deploying: $fn_name"
-            
-            if supabase functions deploy "$fn_name" \
+            echo "Deploying: $fn_name"
+            supabase functions deploy "$fn_name" \
               --project-ref "${{ env.PROJECT_ID }}" \
-              --endpoint "${{ env.SUPABASE_API_URL }}"; then
-              FUNCTION_COUNT=$((FUNCTION_COUNT + 1))
-              echo "✅ $fn_name deployed"
-            else
-              echo "❌ $fn_name failed"
-            fi
+              --endpoint "${{ env.SUPABASE_API_URL }}" && echo "✅ $fn_name"
           done
-          
-          echo ""
-          echo "✅ Deployed $FUNCTION_COUNT function(s)!"
       
-      - name: Print Summary
+      - name: Cleanup
+        if: always()
+        run: |
+          pkill -f "ssh -fN -L 5433" || true
+          rm -f ~/.ssh/id_rsa
+      
+      - name: Summary
         if: always()
         run: |
           echo ""
           echo "============================================"
           echo "  📊 Deployment Summary"
           echo "============================================"
-          echo "  Status: ${{ job.status }}"
-          echo "  Target: ${{ env.SUPABASE_STUDIO_URL }}"
-          echo "  DB: ${{ env.DB_HOST }}:${{ env.DB_PORT }}"
+          echo "  Status     : ${{ job.status }}"
+          echo "  Repository : ${{ github.repository }}"
+          echo "  Branch     : ${{ github.ref_name }}"
+          echo "  Commit     : ${{ github.sha }}"
+          echo "  Author     : ${{ github.actor }}"
+          echo "  Target     : ${{ env.SUPABASE_STUDIO_URL }}"
+          echo "  SSH Host   : ${{ env.SSH_HOST }}"
           echo "============================================"
