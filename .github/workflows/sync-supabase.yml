@@ -8,85 +8,100 @@ on:
 
 env:
   SUPABASE_API_URL: https://supabase-api.cbpcloud.com
-  PROJECT_ID: ojhfgfblwfvwnofoniuk
+  # DB tunnel hostname (Cloudflare tunnel → port 5433 on your server)
+  DB_HOST: db-tunnel.cbpcloud.com
+  DB_PORT: 5432          # tunnel exposes it as standard 5432 externally
+  DB_NAME: postgres
+  DB_USER: postgres
 
 jobs:
   sync-supabase:
     name: Sync DB Migrations & Edge Functions
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      
+
       - name: Setup Supabase CLI
         uses: supabase/setup-cli@v1
         with:
           version: latest
-      
+
+      - name: Install cloudflared (for TCP tunnel access)
+        run: |
+          curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg \
+            | sudo tee /usr/share/keyrings/cloudflare-main.gpg > /dev/null
+          echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared $(lsb_release -cs) main" \
+            | sudo tee /etc/apt/sources.list.d/cloudflared.list
+          sudo apt-get update && sudo apt-get install -y cloudflared postgresql-client
+
+      # Cloudflare Tunnel exposes your DB via TCP — we open a local proxy to it
+      - name: Start Cloudflare TCP tunnel proxy
+        run: |
+          cloudflared access tcp \
+            --hostname ${{ env.DB_HOST }} \
+            --url localhost:15432 &
+          echo "CLOUDFLARED_PID=$!" >> $GITHUB_ENV
+          sleep 3
+          echo "✅ Tunnel proxy started"
+
+      - name: Verify DB connectivity
+        env:
+          PGPASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: |
+          psql -h localhost -p 15432 \
+               -U ${{ env.DB_USER }} \
+               -d ${{ env.DB_NAME }} \
+               -c "SELECT version();" && echo "✅ DB reachable"
+
       - name: Verify Supabase API connectivity
         run: |
           echo "🔍 Checking Supabase API..."
           HTTP_CODE=$(curl --silent --max-time 10 --output /dev/null --write-out "%{http_code}" \
             "${{ env.SUPABASE_API_URL }}/rest/v1/" \
             -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}")
-          
+
           if [[ "$HTTP_CODE" == "200" || "$HTTP_CODE" == "401" ]]; then
-            echo "✅ API reachable"
+            echo "✅ API reachable (HTTP $HTTP_CODE)"
           else
             echo "❌ API unreachable (HTTP $HTTP_CODE)"
             exit 1
           fi
-      
+
       - name: Check migration files
         id: check-migrations
         run: |
-          if [ ! -d "supabase/migrations" ] || [ $(find supabase/migrations -name "*.sql" 2>/dev/null | wc -l) -eq 0 ]; then
+          if [ ! -d "supabase/migrations" ] || \
+             [ $(find supabase/migrations -name "*.sql" 2>/dev/null | wc -l) -eq 0 ]; then
             echo "has_migrations=false" >> $GITHUB_OUTPUT
             echo "⚠️  No migrations found"
           else
             echo "has_migrations=true" >> $GITHUB_OUTPUT
             echo "✅ Migrations found:"
-            find supabase/migrations -name "*.sql" -exec basename {} \;
+            find supabase/migrations -name "*.sql" -exec basename {} \; | sort
           fi
-      
-      - name: Push database migrations via API
+
+      - name: Push database migrations (direct psql via tunnel)
         if: steps.check-migrations.outputs.has_migrations == 'true'
         env:
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          PGPASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: |
-          echo "📦 Pushing migrations via Supabase Management API..."
-          
-          # Link to your project
-          supabase link \
-            --project-ref "${{ env.PROJECT_ID }}" \
-            --endpoint "${{ env.SUPABASE_API_URL }}"
-          
-          # Push migrations using the API endpoint
-          supabase db push \
-            --endpoint "${{ env.SUPABASE_API_URL }}" \
-            --project-ref "${{ env.PROJECT_ID }}" || {
-            echo "⚠️  Direct push failed, trying alternative method..."
-            
-            # Alternative: Apply migrations via REST API
-            for migration in supabase/migrations/*.sql; do
-              [ -f "$migration" ] || continue
-              echo "Applying: $(basename $migration)"
-              
-              SQL_CONTENT=$(cat "$migration")
-              
-              curl -X POST "${{ env.SUPABASE_API_URL }}/rest/v1/rpc/exec_sql" \
-                -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}" \
-                -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
-                -H "Content-Type: application/json" \
-                -d "{\"query\": $(jq -Rs . <<< "$SQL_CONTENT")}"
-            done
-          }
-          
-          echo "✅ Migrations applied!"
-      
+          echo "📦 Applying migrations via psql..."
+
+          for migration in $(find supabase/migrations -name "*.sql" | sort); do
+            echo "➡️  Applying: $(basename $migration)"
+            psql -h localhost -p 15432 \
+                 -U ${{ env.DB_USER }} \
+                 -d ${{ env.DB_NAME }} \
+                 -v ON_ERROR_STOP=1 \
+                 -f "$migration"
+            echo "✅ Done: $(basename $migration)"
+          done
+
+          echo "🎉 All migrations applied!"
+
       - name: Check edge functions
         id: check-functions
         run: |
@@ -94,36 +109,69 @@ jobs:
             echo "has_functions=false" >> $GITHUB_OUTPUT
             exit 0
           fi
-          
+
           FUNCTION_COUNT=0
           for fn_dir in supabase/functions/*/; do
             [ -d "$fn_dir" ] || continue
             fn_name=$(basename "$fn_dir")
             [[ "$fn_name" == "_"* ]] && continue
-            [[ -f "${fn_dir}index.ts" || -f "${fn_dir}index.js" ]] && FUNCTION_COUNT=$((FUNCTION_COUNT + 1))
+            [[ -f "${fn_dir}index.ts" || -f "${fn_dir}index.js" ]] && \
+              FUNCTION_COUNT=$((FUNCTION_COUNT + 1))
           done
-          
-          [ $FUNCTION_COUNT -eq 0 ] && echo "has_functions=false" >> $GITHUB_OUTPUT || echo "has_functions=true" >> $GITHUB_OUTPUT
-      
-      - name: Deploy Edge Functions
+
+          if [ $FUNCTION_COUNT -eq 0 ]; then
+            echo "has_functions=false" >> $GITHUB_OUTPUT
+            echo "⚠️  No edge functions found"
+          else
+            echo "has_functions=true" >> $GITHUB_OUTPUT
+            echo "✅ Found $FUNCTION_COUNT edge function(s)"
+          fi
+
+      - name: Deploy Edge Functions (via Management API)
         if: steps.check-functions.outputs.has_functions == 'true'
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
         run: |
-          echo "🚀 Deploying functions..."
-          
+          echo "🚀 Deploying edge functions..."
+
+          # For self-hosted, deploy using the REST management API directly
           for fn_dir in supabase/functions/*/; do
             [ -d "$fn_dir" ] || continue
             fn_name=$(basename "$fn_dir")
             [[ "$fn_name" == "_"* ]] && continue
-            [[ ! -f "${fn_dir}index.ts" && ! -f "${fn_dir}index.js" ]] && continue
-            
+
+            ENTRY=""
+            [[ -f "${fn_dir}index.ts" ]] && ENTRY="${fn_dir}index.ts"
+            [[ -f "${fn_dir}index.js" ]] && ENTRY="${fn_dir}index.js"
+            [ -z "$ENTRY" ] && continue
+
             echo "Deploying: $fn_name"
-            supabase functions deploy "$fn_name" \
-              --project-ref "${{ env.PROJECT_ID }}" \
-              --endpoint "${{ env.SUPABASE_API_URL }}" && echo "✅ $fn_name deployed"
+
+            # Bundle the function with Deno
+            deno bundle "$ENTRY" /tmp/${fn_name}.js 2>/dev/null || \
+              cp "$ENTRY" /tmp/${fn_name}.js
+
+            ENCODED=$(base64 -w 0 /tmp/${fn_name}.js)
+
+            HTTP_STATUS=$(curl -s -o /tmp/fn_response.json -w "%{http_code}" \
+              -X POST "${{ env.SUPABASE_API_URL }}/functions/v1/${fn_name}" \
+              -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+              -H "Content-Type: application/json" \
+              -d "{\"name\": \"${fn_name}\", \"body\": \"${ENCODED}\"}")
+
+            if [[ "$HTTP_STATUS" == "200" || "$HTTP_STATUS" == "201" ]]; then
+              echo "✅ $fn_name deployed"
+            else
+              echo "⚠️  $fn_name deploy returned HTTP $HTTP_STATUS:"
+              cat /tmp/fn_response.json
+            fi
           done
-      
+
+      - name: Cleanup tunnel
+        if: always()
+        run: |
+          [ -n "$CLOUDFLARED_PID" ] && kill $CLOUDFLARED_PID 2>/dev/null || true
+
       - name: Summary
         if: always()
         run: |
@@ -131,6 +179,7 @@ jobs:
           echo "============================================"
           echo "  📊 Deployment Summary"
           echo "============================================"
-          echo "  Status: ${{ job.status }}"
-          echo "  Target: ${{ env.SUPABASE_API_URL }}"
+          echo "  Status : ${{ job.status }}"
+          echo "  DB     : ${{ env.DB_HOST }}:15432 (via tunnel)"
+          echo "  API    : ${{ env.SUPABASE_API_URL }}"
           echo "============================================"
