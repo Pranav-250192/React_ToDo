@@ -67,7 +67,7 @@ jobs:
 
           echo "Pushing migrations..."
           PGCONNECT_TIMEOUT=30 supabase db push \
-            --db-url "postgresql://postgres:${SUPABASE_DB_PASSWORD}@127.0.0.1:15432/postgres?sslmode=disable"
+            --db-url "postgresql://postgres.dev_tenant:${SUPABASE_DB_PASSWORD}@127.0.0.1:15432/postgres?sslmode=disable"
 
       - name: Deploy Edge Functions
         run: |
