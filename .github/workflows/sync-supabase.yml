@@ -11,7 +11,7 @@ env:
   SUPABASE_STUDIO_URL: https://supabase-api.cbpcloud.com
   PROJECT_ID: ojhfgfblwfvwnofoniuk
   DB_HOST: db-tunnel.cbpcloud.com
-  DB_PORT: 5433  # Changed from 15432 to 5433 based on your tunnel config
+  DB_PORT: 5433  # Will work after updating tunnel config
 
 jobs:
   sync-supabase:
@@ -31,19 +31,12 @@ jobs:
       - name: Install PostgreSQL client
         run: |
           sudo apt-get update
-          sudo apt-get install -y postgresql-client dnsutils
-      
-      - name: Configure network for IPv4
-        run: |
-          echo "🔧 Configuring network for IPv4 only..."
-          sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1
-          sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1
-          echo "✅ IPv6 disabled"
+          sudo apt-get install -y postgresql-client netcat-openbsd
       
       - name: Verify Supabase API connectivity
         run: |
           echo "🔍 Checking Supabase API connectivity..."
-          HTTP_CODE=$(curl -4 --silent --max-time 10 --output /dev/null --write-out "%{http_code}" \
+          HTTP_CODE=$(curl --silent --max-time 10 --output /dev/null --write-out "%{http_code}" \
             "${{ env.SUPABASE_API_URL }}/rest/v1/" \
             -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}")
           
@@ -56,63 +49,32 @@ jobs:
             exit 1
           fi
       
-      - name: Resolve database host to IPv4
-        id: resolve-db
-        run: |
-          echo "🔍 Resolving ${{ env.DB_HOST }} to IPv4..."
-          
-          # Try multiple methods to resolve IPv4
-          DB_IP=$(dig +short ${{ env.DB_HOST }} A | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
-          
-          if [ -z "$DB_IP" ]; then
-            echo "⚠️  dig failed, trying getent..."
-            DB_IP=$(getent ahostsv4 ${{ env.DB_HOST }} | awk '{print $1}' | head -n1)
-          fi
-          
-          if [ -z "$DB_IP" ]; then
-            echo "⚠️  getent failed, trying host command..."
-            DB_IP=$(host -t A ${{ env.DB_HOST }} | grep "has address" | awk '{print $4}' | head -n1)
-          fi
-          
-          if [ -z "$DB_IP" ]; then
-            echo "❌ Could not resolve ${{ env.DB_HOST }} to IPv4 address"
-            echo "DNS query results:"
-            dig ${{ env.DB_HOST }} ANY
-            exit 1
-          fi
-          
-          echo "✅ Resolved to IPv4: $DB_IP"
-          echo "db_ip=$DB_IP" >> $GITHUB_OUTPUT
-      
       - name: Test database connectivity
         env:
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: |
           echo "🔌 Testing database connection..."
-          DB_IP="${{ steps.resolve-db.outputs.db_ip }}"
+          echo "Host: ${{ env.DB_HOST }}"
+          echo "Port: ${{ env.DB_PORT }}"
           
-          echo "Connecting to: $DB_IP:${{ env.DB_PORT }}"
-          echo "Via Cloudflare Tunnel: ${{ env.DB_HOST }}"
-          
-          # Test TCP connection with timeout
+          # Test TCP connection
           echo "Testing TCP port..."
-          timeout 30s bash -c "cat < /dev/null > /dev/tcp/$DB_IP/${{ env.DB_PORT }}" 2>/dev/null && \
-            echo "✅ Port ${{ env.DB_PORT }} is open on $DB_IP" || \
-            { echo "❌ Cannot connect to $DB_IP:${{ env.DB_PORT }}"; exit 1; }
+          if timeout 10s bash -c "echo > /dev/tcp/${{ env.DB_HOST }}/${{ env.DB_PORT }}" 2>/dev/null; then
+            echo "✅ Port ${{ env.DB_PORT }} is reachable"
+          else
+            echo "❌ Cannot connect to ${{ env.DB_HOST }}:${{ env.DB_PORT }}"
+            exit 1
+          fi
           
           # Test PostgreSQL connection
           echo "Testing PostgreSQL authentication..."
           PGPASSWORD="${SUPABASE_DB_PASSWORD}" PGCONNECT_TIMEOUT=10 psql \
-            -h "$DB_IP" \
+            -h "${{ env.DB_HOST }}" \
             -p ${{ env.DB_PORT }} \
             -U postgres \
             -d postgres \
             -c "SELECT version();" || {
-            echo "❌ PostgreSQL authentication or connection failed"
-            echo "Please verify:"
-            echo "  1. SUPABASE_DB_PASSWORD secret is correct"
-            echo "  2. Cloudflare Tunnel is running: db-tunnel.cbpcloud.com -> localhost:5433"
-            echo "  3. Supavisor/PostgreSQL is listening on localhost:5433"
+            echo "❌ PostgreSQL authentication failed"
             exit 1
           }
           
@@ -149,28 +111,15 @@ jobs:
           echo "  📦 Pushing Database Migrations"
           echo "============================================"
           
-          DB_IP="${{ steps.resolve-db.outputs.db_ip }}"
-          
-          echo "Database IP  : $DB_IP"
-          echo "Database Port: ${{ env.DB_PORT }}"
-          echo "Database User: postgres"
-          echo "Via Tunnel   : ${{ env.DB_HOST }}"
-          echo ""
-          
-          echo "Pushing migrations..."
           PGCONNECT_TIMEOUT=30 supabase db push \
-            --db-url "postgresql://postgres:${SUPABASE_DB_PASSWORD}@${DB_IP}:${{ env.DB_PORT }}/postgres?sslmode=disable" || {
-            echo "❌ Migration push failed"
-            exit 1
-          }
+            --db-url "postgresql://postgres:${SUPABASE_DB_PASSWORD}@${{ env.DB_HOST }}:${{ env.DB_PORT }}/postgres?sslmode=disable"
           
-          echo ""
           echo "✅ Migrations pushed successfully!"
       
       - name: Skip migrations message
         if: steps.check-migrations.outputs.has_migrations == 'false'
         run: |
-          echo "ℹ️  No migrations to push - skipping migration step"
+          echo "ℹ️  No migrations to push"
       
       - name: Check edge functions
         id: check-functions
@@ -178,7 +127,6 @@ jobs:
           echo "📂 Checking for edge functions..."
           
           if [ ! -d "supabase/functions" ]; then
-            echo "⚠️  No edge functions directory found"
             echo "has_functions=false" >> $GITHUB_OUTPUT
             exit 0
           fi
@@ -188,12 +136,10 @@ jobs:
             [ -d "$fn_dir" ] || continue
             fn_name=$(basename "$fn_dir")
             
-            # Skip private/shared directories
             if [[ "$fn_name" == "_"* ]]; then
               continue
             fi
             
-            # Check if index file exists
             if [[ -f "${fn_dir}index.ts" || -f "${fn_dir}index.js" ]]; then
               FUNCTION_COUNT=$((FUNCTION_COUNT + 1))
             fi
@@ -217,105 +163,42 @@ jobs:
           echo "============================================"
           
           FUNCTION_COUNT=0
-          DEPLOYED_FUNCTIONS=""
-          FAILED_FUNCTIONS=""
           
           for fn_dir in supabase/functions/*/; do
             [ -d "$fn_dir" ] || continue
-            
             fn_name=$(basename "$fn_dir")
             
-            # Skip private/shared directories
             if [[ "$fn_name" == "_"* ]]; then
-              echo "⏭️  Skipping private directory: $fn_name"
               continue
             fi
             
-            # Check if index file exists
             if [[ ! -f "${fn_dir}index.ts" && ! -f "${fn_dir}index.js" ]]; then
-              echo "⚠️  Skipping $fn_name (no index file found)"
               continue
             fi
             
-            echo ""
-            echo "📦 Deploying function: $fn_name"
+            echo "📦 Deploying: $fn_name"
             
             if supabase functions deploy "$fn_name" \
               --project-ref "${{ env.PROJECT_ID }}" \
               --endpoint "${{ env.SUPABASE_API_URL }}"; then
               FUNCTION_COUNT=$((FUNCTION_COUNT + 1))
-              DEPLOYED_FUNCTIONS="${DEPLOYED_FUNCTIONS}\n  ✅ ${fn_name}"
+              echo "✅ $fn_name deployed"
             else
-              FAILED_FUNCTIONS="${FAILED_FUNCTIONS}\n  ❌ ${fn_name}"
+              echo "❌ $fn_name failed"
             fi
           done
           
           echo ""
-          echo "============================================"
-          if [ $FUNCTION_COUNT -eq 0 ]; then
-            echo "❌ No functions deployed successfully"
-            if [ -n "$FAILED_FUNCTIONS" ]; then
-              echo -e "Failed functions:$FAILED_FUNCTIONS"
-            fi
-            exit 1
-          else
-            echo "✅ Deployed $FUNCTION_COUNT function(s)!"
-            echo -e "$DEPLOYED_FUNCTIONS"
-            if [ -n "$FAILED_FUNCTIONS" ]; then
-              echo -e "\n⚠️  Some functions failed:$FAILED_FUNCTIONS"
-            fi
-          fi
+          echo "✅ Deployed $FUNCTION_COUNT function(s)!"
       
-      - name: Skip functions message
-        if: steps.check-functions.outputs.has_functions == 'false'
-        run: |
-          echo "ℹ️  No edge functions to deploy - skipping function deployment"
-      
-      - name: Print Deployment Summary
+      - name: Print Summary
         if: always()
         run: |
           echo ""
           echo "============================================"
           echo "  📊 Deployment Summary"
           echo "============================================"
-          echo "  Repository : ${{ github.repository }}"
-          echo "  Branch     : ${{ github.ref_name }}"
-          echo "  Commit     : ${{ github.sha }}"
-          echo "  Commit Msg : ${{ github.event.head_commit.message }}"
-          echo "  Author     : ${{ github.actor }}"
-          echo "  Status     : ${{ job.status }}"
-          echo "  Target     : ${{ env.SUPABASE_STUDIO_URL }}"
-          echo "  DB Host    : ${{ steps.resolve-db.outputs.db_ip }}:${{ env.DB_PORT }}"
-          echo "  Tunnel     : ${{ env.DB_HOST }} -> localhost:5433"
-          echo "============================================"
-      
-      - name: Notify on failure
-        if: failure()
-        run: |
-          echo ""
-          echo "============================================"
-          echo "  ❌ Deployment Failed"
-          echo "============================================"
-          echo ""
-          echo "📋 Troubleshooting Checklist:"
-          echo ""
-          echo "1. Cloudflare Tunnel Status:"
-          echo "   - Check tunnel is running: db-tunnel.cbpcloud.com"
-          echo "   - Verify it forwards to: tcp://localhost:5433"
-          echo ""
-          echo "2. Supabase/Supavisor Status:"
-          echo "   - Confirm service is listening on port 5433"
-          echo "   - Check PostgreSQL is accessible"
-          echo ""
-          echo "3. GitHub Secrets:"
-          echo "   - SUPABASE_DB_PASSWORD is correct"
-          echo "   - SUPABASE_ANON_KEY is set"
-          echo "   - SUPABASE_ACCESS_TOKEN is valid"
-          echo ""
-          echo "4. Network & DNS:"
-          echo "   - db-tunnel.cbpcloud.com resolves correctly"
-          echo "   - No firewall blocking port 5433"
-          echo ""
-          echo "📎 Full logs available at:"
-          echo "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "  Status: ${{ job.status }}"
+          echo "  Target: ${{ env.SUPABASE_STUDIO_URL }}"
+          echo "  DB: ${{ env.DB_HOST }}:${{ env.DB_PORT }}"
           echo "============================================"
