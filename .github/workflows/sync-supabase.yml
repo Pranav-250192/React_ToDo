@@ -68,7 +68,7 @@ jobs:
       - name: Print sync summary
         if: always()
         run: |
-          echo "========================================="
+          echo "============================================="
           echo "  Sync Summary"
           echo "========================================="
           echo "  Repo   : https://github.com/Pranav-250192/React_ToDo"
