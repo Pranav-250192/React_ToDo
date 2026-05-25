@@ -47,32 +47,46 @@ jobs:
           sudo mv cloudflared /usr/local/bin/
           cloudflared --version
 
-      - name: Start Cloudflare TCP tunnel & Push migrations
+      - name: Start Cloudflare tunnel & Push migrations
         run: |
-          echo "Starting Cloudflare TCP tunnel..."
+          echo "Setting up tunnel credentials..."
+          mkdir -p ~/.cloudflared
 
-          # Start tunnel - forwards localhost:15432 → supabase-db.cbpcloud.com
-          cloudflared access tcp \
-            --hostname supabase-db.cbpcloud.com \
-            --url localhost:15432 > /tmp/cloudflared.log 2>&1 &
+          # Write tunnel credentials
+          echo '${{ secrets.CLOUDFLARE_TUNNEL_CREDS }}' \
+            > ~/.cloudflared/209e0f3d-fb94-4703-92ad-cd83a2c94179.json
+
+          # Write tunnel config - forwards localhost:15432 to DB container
+          cat > ~/.cloudflared/config.yml << 'EOF'
+          tunnel: 209e0f3d-fb94-4703-92ad-cd83a2c94179
+          credentials-file: /root/.cloudflared/209e0f3d-fb94-4703-92ad-cd83a2c94179.json
+          ingress:
+            - hostname: db-tunnel.cbpcloud.com
+              service: tcp://localhost:15432
+            - service: http_status:404
+          EOF
+
+          # Start tunnel in background
+          cloudflared tunnel --config ~/.cloudflared/config.yml run \
+            209e0f3d-fb94-4703-92ad-cd83a2c94179 > /tmp/tunnel.log 2>&1 &
           TUNNEL_PID=$!
           echo "Tunnel PID: $TUNNEL_PID"
 
-          # Wait for tunnel to be ready
-          echo "Waiting for tunnel..."
-          for i in {1..10}; do
+          # Wait for tunnel to connect
+          echo "Waiting for tunnel to connect..."
+          for i in {1..15}; do
             sleep 2
-            if nc -z localhost 15432 2>/dev/null; then
-              echo "Tunnel is ready!"
+            if grep -q "Registered tunnel connection" /tmp/tunnel.log 2>/dev/null; then
+              echo "Tunnel connected!"
               break
             fi
-            echo "Attempt $i: tunnel not ready yet..."
+            echo "Attempt $i: waiting..."
+            cat /tmp/tunnel.log 2>/dev/null | tail -3
           done
 
-          # Show tunnel logs
-          cat /tmp/cloudflared.log
+          cat /tmp/tunnel.log
 
-          # Push migrations via tunnel
+          # Push migrations
           echo "Pushing migrations..."
           supabase db push \
             --db-url "postgresql://postgres:${{ secrets.SUPABASE_DB_PASSWORD }}@localhost:15432/postgres"
