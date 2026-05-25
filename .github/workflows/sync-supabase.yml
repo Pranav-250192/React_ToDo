@@ -39,35 +39,13 @@ jobs:
             exit 1
           fi
 
-      - name: Install cloudflared
-        run: |
-          curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
-          chmod +x cloudflared
-          sudo mv cloudflared /usr/local/bin/
-          cloudflared --version
-
       - name: Push database migrations via Cloudflare tunnel
         env:
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: |
-          echo "Starting Cloudflare TCP proxy..."
-          cloudflared access tcp --hostname db-tunnel.cbpcloud.com --url 127.0.0.1:15432 &
-          CF_PID=$!
-          echo "Cloudflared PID: $CF_PID"
-
-          echo "Waiting for proxy to be ready..."
-          for i in {1..10}; do
-            sleep 2
-            if nc -z 127.0.0.1 15432 2>/dev/null; then
-              echo "Proxy is ready!"
-              break
-            fi
-            echo "Attempt $i: not ready yet..."
-          done
-
-          echo "Pushing migrations..."
+          echo "Pushing migrations to self-hosted Supabase..."
           PGCONNECT_TIMEOUT=30 supabase db push \
-            --db-url "postgresql://postgres.dev_tenant:${SUPABASE_DB_PASSWORD}@127.0.0.1:15432/postgres?sslmode=disable"
+            --db-url "postgresql://postgres:${SUPABASE_DB_PASSWORD}@db-tunnel.cbpcloud.com:15432/postgres?sslmode=disable"
 
       - name: Deploy Edge Functions
         run: |
